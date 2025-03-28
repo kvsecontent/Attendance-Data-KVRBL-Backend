@@ -1,494 +1,268 @@
-// app.js - Modified for direct date headers
-const express = require('express');
-const cors = require('cors');
-const { google } = require('googleapis');
-const dotenv = require('dotenv');
+// This function replaces the existing processStudentData in your app.js
 
-// Load environment variables
-dotenv.config();
-
-const app = express();
-const port = process.env.PORT || 3000;
-
-// API key and Sheet ID from environment variables
-const API_KEY = process.env.GOOGLE_API_KEY;
-const SHEET_ID = process.env.GOOGLE_SHEET_ID;
-
-app.use(cors({
-  origin: '*', 
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
-// Health check endpoint
-app.get('/', (req, res) => {
-  res.json({ status: 'API is running' });
-});
-
-// Test endpoint
-app.get('/test', async (req, res) => {
+function processStudentData(sheetsData, admissionNumber) {
   try {
-    res.json({ 
-      success: true, 
-      message: 'Test endpoint working',
-      env: {
-        sheetId: SHEET_ID ? 'Set properly' : 'Missing',
-        apiKey: API_KEY ? 'Key exists' : 'Missing'
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Endpoint to get student data
-app.get('/api/student/:rollNumber', async (req, res) => {
-  try {
-    const sheets = google.sheets({ version: 'v4' });
-    const response = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: 'Students!A:G',
-      key: API_KEY
-    });
+    // Extract value ranges from the response
+    const [studentsSheet, subjectsSheet, activitiesSheet, 
+           assignmentsSheet, testsSheet, correctionsSheet, 
+           attendanceSheet] = sheetsData.valueRanges;
     
-    if (!response.data.values || response.data.values.length <= 1) {
-      return res.status(404).json({ success: false, message: 'No student data found in the sheet' });
+    // Extract headers from each sheet
+    const studentsHeaders = studentsSheet.values[0];
+    const subjectsHeaders = subjectsSheet.values[0];
+    const activitiesHeaders = activitiesSheet.values[0];
+    const assignmentsHeaders = assignmentsSheet.values[0];
+    const testsHeaders = testsSheet.values[0];
+    const correctionsHeaders = correctionsSheet.values[0];
+    const attendanceHeaders = attendanceSheet.values[0];
+    
+    // Find student info - basic info still has one row per student
+    const studentData = findStudentByAdmissionNo(studentsSheet.values, studentsHeaders, admissionNumber);
+    
+    if (!studentData) {
+      throw new Error(`Student with admission number ${admissionNumber} not found`);
     }
     
-    // Assuming first row is header
-    const headers = response.data.values[0];
-    
-    // Find the Roll Number column index
-    const rollIndex = headers.findIndex(header => 
-      header.toLowerCase().includes('roll') || 
-      header.toLowerCase().includes('admission') || 
-      header.toLowerCase().includes('id'));
-    
-    if (rollIndex === -1) {
-      return res.status(400).json({ success: false, message: 'Roll Number column not found' });
-    }
-    
-    // Find student by roll number
-    const studentRow = response.data.values.find(row => row[rollIndex] === req.params.rollNumber);
-    
-    if (!studentRow) {
-      return res.status(404).json({ success: false, message: 'Student not found' });
-    }
-    
-    // Find school column index
-    const schoolIndex = headers.findIndex(h => 
-      h.toLowerCase() === 'school' || 
-      h.toLowerCase() === 'school name' || 
-      h.toLowerCase() === 'institution' || 
-      h.toLowerCase() === 'school_name'
-    );
-    
-    // Map student data
-    const student = {
-      name: studentRow[headers.findIndex(h => h.toLowerCase().includes('name') && !h.toLowerCase().includes('father') && !h.toLowerCase().includes('mother'))] || 'N/A',
-      class: studentRow[headers.findIndex(h => h.toLowerCase().includes('class'))] || 'N/A',
-      School: schoolIndex !== -1 && studentRow[schoolIndex] ? studentRow[schoolIndex] : 'KENDRIYA VIDYALAYA SANGTHAN',
-      dob: studentRow[headers.findIndex(h => h.toLowerCase().includes('dob') || h.toLowerCase().includes('birth'))] || 'N/A',
-      fatherName: studentRow[headers.findIndex(h => h.toLowerCase().includes('father'))] || 'N/A',
-      motherName: studentRow[headers.findIndex(h => h.toLowerCase().includes('mother'))] || 'N/A'
+    // Extract student basic info - this remains the same
+    const studentInfo = {
+      name: getValueByHeader(studentData, studentsHeaders, 'name'),
+      class: getValueByHeader(studentData, studentsHeaders, 'class'),
+      admissionNo: getValueByHeader(studentData, studentsHeaders, 'admission_no'),
+      rollNo: getValueByHeader(studentData, studentsHeaders, 'roll_no'),
+      dob: getValueByHeader(studentData, studentsHeaders, 'dob'),
+      contact: getValueByHeader(studentData, studentsHeaders, 'contact'),
+      photoUrl: getValueByHeader(studentData, studentsHeaders, 'photo_url') || '/api/placeholder/120/120'
     };
     
-    res.json({ success: true, data: student });
-  } catch (error) {
-    console.error('Error fetching student data:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Combined endpoint for student and attendance data
-app.get('/api/student/:rollNumber/combined', async (req, res) => {
-  try {
-    // Get student info
-    const sheets = google.sheets({ version: 'v4' });
-    const studentResponse = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: 'Students!A:G',
-      key: API_KEY
-    });
+    // ==== NEW CODE: Process horizontal subjects data ====
+    const subjectProgress = processHorizontalSubjects(subjectsSheet.values, subjectsHeaders, admissionNumber);
     
-    if (!studentResponse.data.values || studentResponse.data.values.length <= 1) {
-      return res.status(404).json({ success: false, message: 'No student data found in the sheet' });
-    }
+    // ==== NEW CODE: Process horizontal attendance data ====
+    const attendance = processHorizontalAttendance(attendanceSheet.values, attendanceHeaders, admissionNumber);
     
-    // Assuming first row is header
-    const studentHeaders = studentResponse.data.values[0];
+    // For these sheets, we'll keep the vertical structure for flexibility
+    // but we could convert them to horizontal if needed
+    const subjectActivities = filterSheetByAdmissionNo(activitiesSheet.values, activitiesHeaders, admissionNumber)
+      .map(row => ({
+        subject: getValueByHeader(row, activitiesHeaders, 'subject'),
+        activity: getValueByHeader(row, activitiesHeaders, 'activity'),
+        date: getValueByHeader(row, activitiesHeaders, 'date'),
+        description: getValueByHeader(row, activitiesHeaders, 'description'),
+        status: getValueByHeader(row, activitiesHeaders, 'status')
+      }));
     
-    // Find the Roll Number column index
-    const rollIndex = studentHeaders.findIndex(header => 
-      header.toLowerCase().includes('roll') || 
-      header.toLowerCase().includes('admission') || 
-      header.toLowerCase().includes('id'));
+    // Extract assignments
+    const assignments = filterSheetByAdmissionNo(assignmentsSheet.values, assignmentsHeaders, admissionNumber)
+      .map(row => ({
+        subject: getValueByHeader(row, assignmentsHeaders, 'subject'),
+        name: getValueByHeader(row, assignmentsHeaders, 'name'),
+        assignedDate: getValueByHeader(row, assignmentsHeaders, 'assigned_date'),
+        dueDate: getValueByHeader(row, assignmentsHeaders, 'due_date'),
+        status: getValueByHeader(row, assignmentsHeaders, 'status'),
+        remarks: getValueByHeader(row, assignmentsHeaders, 'remarks') || ''
+      }));
     
-    if (rollIndex === -1) {
-      return res.status(400).json({ success: false, message: 'Roll Number column not found' });
-    }
+    // Extract recent tests
+    const allTests = filterSheetByAdmissionNo(testsSheet.values, testsHeaders, admissionNumber)
+      .map(row => ({
+        subject: getValueByHeader(row, testsHeaders, 'subject'),
+        name: getValueByHeader(row, testsHeaders, 'name'),
+        date: getValueByHeader(row, testsHeaders, 'date'),
+        maxMarks: parseInt(getValueByHeader(row, testsHeaders, 'max_marks')),
+        marksObtained: parseInt(getValueByHeader(row, testsHeaders, 'marks_obtained')),
+        percentage: parseFloat(getValueByHeader(row, testsHeaders, 'percentage')),
+        grade: getValueByHeader(row, testsHeaders, 'grade')
+      }));
     
-    // Find student by roll number
-    const studentRow = studentResponse.data.values.find(row => row[rollIndex] === req.params.rollNumber);
+    // Sort tests by date (newest first) and take the 5 most recent
+    const recentTests = [...allTests].sort((a, b) => {
+      const dateA = new Date(a.date.split('-').reverse().join('-'));
+      const dateB = new Date(b.date.split('-').reverse().join('-'));
+      return dateB - dateA;
+    }).slice(0, 5).map(test => ({
+      subject: test.subject,
+      name: test.name,
+      date: test.date,
+      marks: `${test.marksObtained}/${test.maxMarks}`,
+      percentage: test.percentage,
+      grade: test.grade
+    }));
     
-    if (!studentRow) {
-      return res.status(404).json({ success: false, message: 'Student not found' });
-    }
+    // Extract copy corrections
+    const corrections = filterSheetByAdmissionNo(correctionsSheet.values, correctionsHeaders, admissionNumber)
+      .map(row => ({
+        subject: getValueByHeader(row, correctionsHeaders, 'subject'),
+        copyType: getValueByHeader(row, correctionsHeaders, 'copy_type'),
+        date: getValueByHeader(row, correctionsHeaders, 'date'),
+        improvements: getValueByHeader(row, correctionsHeaders, 'improvements'),
+        remarks: getValueByHeader(row, correctionsHeaders, 'remarks')
+      }));
     
-    // Find school column index
-    const schoolIndex = studentHeaders.findIndex(h => 
-      h.toLowerCase() === 'school' || 
-      h.toLowerCase() === 'school name' || 
-      h.toLowerCase() === 'institution' || 
-      h.toLowerCase() === 'school_name'
-    );
+    // Calculate summary statistics
+    const completedAssignments = assignments.filter(a => a.status === 'complete').length;
+    const pendingAssignments = assignments.filter(a => a.status === 'pending').length;
+    const overallAttendance = attendance.length > 0 
+      ? attendance.reduce((sum, month) => sum + month.percentage, 0) / attendance.length
+      : 0;
     
-    // Map student data
-    const student = {
-      name: studentRow[studentHeaders.findIndex(h => h.toLowerCase().includes('name') && !h.toLowerCase().includes('father') && !h.toLowerCase().includes('mother'))] || 'N/A',
-      class: studentRow[studentHeaders.findIndex(h => h.toLowerCase().includes('class'))] || 'N/A',
-      School: schoolIndex !== -1 && studentRow[schoolIndex] ? studentRow[schoolIndex] : 'KENDRIYA VIDYALAYA SANGTHAN',
-      dob: studentRow[studentHeaders.findIndex(h => h.toLowerCase().includes('dob') || h.toLowerCase().includes('birth'))] || 'N/A',
-      fatherName: studentRow[studentHeaders.findIndex(h => h.toLowerCase().includes('father'))] || 'N/A',
-      motherName: studentRow[studentHeaders.findIndex(h => h.toLowerCase().includes('mother'))] || 'N/A'
-    };
-    
-    // Now get attendance data - EXPANDED RANGE TO INCLUDE MORE COLUMNS
-    const attendanceResponse = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: 'Attendance!A:ZZ', // Changed from A:Z to A:ZZ to include more columns
-      key: API_KEY
-    });
-    
-    // Default attendance object in case there's no data
-    let attendanceData = {
-      attendance: {
-        yearToDate: {
-          totalDays: 0,
-          daysPresent: 0,
-          daysAbsent: 0,
-          percentage: 0
-        },
-        months: [],
-        academicYear: "2024-25" // Default academic year
+    // Compile all data
+    return {
+      studentInfo,
+      subjectProgress,
+      recentTests,
+      subjectActivities,
+      assignments,
+      tests: allTests,
+      corrections,
+      attendance,
+      summary: {
+        totalSubjects: subjectProgress.length,
+        completedAssignments,
+        pendingAssignments,
+        attendancePercentage: `${overallAttendance.toFixed(1)}%`
       }
     };
-    
-    if (attendanceResponse.data.values && attendanceResponse.data.values.length > 1) {
-      // Process attendance data
-      const headerRow = attendanceResponse.data.values[0];
-      
-      // Find roll number column
-      const attendanceRollIndex = headerRow.findIndex(header => 
-        header && header.toString().toLowerCase().includes('roll') || 
-        (header && header.toString().toLowerCase().includes('admission')) || 
-        (header && header.toString().toLowerCase().includes('id')));
-      
-      if (attendanceRollIndex !== -1) {
-        // Find the student row
-        const studentAttendanceRow = attendanceResponse.data.values.find(row => 
-          row[attendanceRollIndex] === req.params.rollNumber);
-        
-        if (studentAttendanceRow) {
-          // Find date columns - looking for actual dates in headers
-          const dateColumns = [];
-          
-          for (let i = 0; i < headerRow.length; i++) {
-            const headerText = headerRow[i] ? headerRow[i].toString() : '';
-            // Skip the roll number column
-            if (i === attendanceRollIndex) continue;
-            
-            // Check if this column header is a date
-            if (isDateString(headerText)) {
-              dateColumns.push(i);
-            }
-          }
-          
-          console.log("Detected date columns:", dateColumns.map(col => headerRow[col]));
-          
-          // Process attendance data by month
-          const attendanceByMonth = {};
-          let totalSchoolDays = 0;
-          let totalPresent = 0;
-          let latestDate = null;
-          
-          dateColumns.forEach(col => {
-            const dateStr = headerRow[col];
-            // Get status value, if empty or undefined, treat as non-school day
-            const statusValue = studentAttendanceRow[col] ? studentAttendanceRow[col].toString().toLowerCase() : '';
-            
-            // Check for time value - assume it's in the next column if available
-            const timeValue = (col + 1 < studentAttendanceRow.length) ? 
-                             studentAttendanceRow[col + 1] : '';
-            
-            if (!dateStr) return;
-            
-            // Parse date
-            let date = parseDate(dateStr);
-            
-            if (!date || isNaN(date.getTime())) return; // Skip invalid dates
-            
-            // Keep track of the latest date for academic year calculation
-            if (!latestDate || date > latestDate) {
-              latestDate = date;
-            }
-            
-            const month = date.getMonth();
-            const year = date.getFullYear();
-            const day = date.getDate();
-            
-            // Create month entry if it doesn't exist
-            const monthKey = `${month}-${year}`;
-            if (!attendanceByMonth[monthKey]) {
-              attendanceByMonth[monthKey] = {
-                month,
-                year,
-                totalDays: 0,
-                daysPresent: 0,
-                daysAbsent: 0,
-                percentage: 0,
-                days: []
-              };
-            }
-            
-            // Check if the value indicates Sunday or Holiday
-            const isSunday = statusValue.includes('sun') || statusValue === 's';
-            const isHoliday = statusValue.includes('hol') || statusValue === 'h';
-            
-            // Get day of week name for blank fields
-            const dayOfWeek = date.getDay();
-            const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-            const dayName = dayNames[dayOfWeek];
-            
-            // If value is blank/empty, show the day of the week
-            if (!statusValue || statusValue.trim() === '') {
-              attendanceByMonth[monthKey].days.push({
-                day,
-                isSchoolDay: false,
-                status: 'day-of-week', // Special status for day of week
-                dayName: dayName, // The actual day name (e.g., "Tuesday")
-                timeStatus: '',
-                isSunday: dayOfWeek === 0,
-                isHoliday: false
-              });
-              // Don't update attendance counters for non-school days
-            }
-            else if (isSunday) {
-              // Add as Sunday
-              attendanceByMonth[monthKey].days.push({
-                day,
-                isSchoolDay: false,
-                status: 'sunday',
-                timeStatus: '',
-                isSunday: true,
-                isHoliday: false
-              });
-              
-              // Don't update attendance counters for Sundays
-            } 
-            else if (isHoliday) {
-              // Add as Holiday
-              attendanceByMonth[monthKey].days.push({
-                day,
-                isSchoolDay: false,
-                status: 'holiday',
-                timeStatus: '',
-                isSunday: false,
-                isHoliday: true
-              });
-              
-              // Don't update attendance counters for Holidays
-            } 
-            else {
-              // Parse status - treat any variation of "present" as present
-              const isPresent = statusValue.includes('p') || statusValue === '1';
-              
-              // Parse time status
-              let timeStatus = '';
-              if (timeValue) {
-                if (timeValue.toString().toLowerCase().includes('late') || 
-                    timeValue.toString().toLowerCase().includes('came')) {
-                  timeStatus = 'late';
-                } else if (isPresent) {
-                  timeStatus = 'on-time';
-                }
-              } else if (isPresent) {
-                timeStatus = 'on-time'; // Default for present students
-              }
-              
-              // Add day to month
-              attendanceByMonth[monthKey].days.push({
-                day,
-                isSchoolDay: true,
-                status: isPresent ? 'present' : 'absent',
-                timeStatus
-              });
-              
-              // Update monthly counters
-              attendanceByMonth[monthKey].totalDays++;
-              if (isPresent) {
-                attendanceByMonth[monthKey].daysPresent++;
-              } else {
-                attendanceByMonth[monthKey].daysAbsent++;
-              }
-              
-              // Update yearly counters
-              totalSchoolDays++;
-              if (isPresent) totalPresent++;
-            }
-          });
-          
-          // Calculate percentages and format months as array
-          const months = Object.values(attendanceByMonth).map(month => {
-            if (month.totalDays > 0) {
-              month.percentage = ((month.daysPresent / month.totalDays) * 100).toFixed(1);
-            }
-            return month;
-          });
-          
-          // Fill in weekend days (Sundays) and missing days as holidays
-          months.forEach(month => {
-            const daysInMonth = new Date(month.year, month.month + 1, 0).getDate();
-            
-            // Create a map for quick lookup of existing days
-            const existingDays = {};
-            month.days.forEach(day => {
-              existingDays[day.day] = true;
-            });
-            
-            // Add missing days (weekends and holidays)
-            for (let day = 1; day <= daysInMonth; day++) {
-              if (!existingDays[day]) {
-                const date = new Date(month.year, month.month, day);
-                const dayOfWeek = date.getDay();
-                const isSunday = dayOfWeek === 0;
-                
-                month.days.push({
-                  day,
-                  isSchoolDay: false,
-                  status: isSunday ? 'sunday' : 'no-school',
-                  timeStatus: '',
-                  isWeekend: isSunday,
-                  isSunday: isSunday,
-                  isHoliday: !isSunday // If not Sunday, mark as holiday
-                });
-              }
-            }
-            
-            // Sort days numerically
-            month.days.sort((a, b) => a.day - b.day);
-          });
-          
-          // Determine academic year based on latest month data
-          // If latest month is April or later, use YYYY-(YYYY+1), otherwise use (YYYY-1)-YYYY
-          let academicYear = "2024-25"; // Default
-          if (latestDate) {
-            const month = latestDate.getMonth(); // 0 for Jan, 3 for April
-            const year = latestDate.getFullYear();
-            if (month >= 3) { // April (index 3) or later
-              academicYear = `${year}-${(year + 1).toString().substr(2, 2)}`;
-            } else {
-              academicYear = `${year - 1}-${year.toString().substr(2, 2)}`;
-            }
-          }
-          
-          // Create full attendance data object
-          attendanceData = {
-            attendance: {
-              yearToDate: {
-                totalDays: totalSchoolDays,
-                daysPresent: totalPresent,
-                daysAbsent: totalSchoolDays - totalPresent,
-                percentage: totalSchoolDays > 0 ? ((totalPresent / totalSchoolDays) * 100).toFixed(1) : 0
-              },
-              months,
-              academicYear
-            }
-          };
-        }
-      }
-    }
-    
-    // Return combined data
-    res.json({ 
-      success: true, 
-      data: {
-        student,
-        attendance: attendanceData.attendance
-      }
-    });
   } catch (error) {
-    console.error('Error fetching combined data:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Helper function to check if a string is a date
-function isDateString(str) {
-  if (!str) return false;
-  
-  // Convert to string if not already
-  const dateStr = str.toString().trim();
-  
-  // Check for DD/MM/YYYY or MM/DD/YYYY format
-  if (dateStr.includes('/')) {
-    const parts = dateStr.split('/');
-    if (parts.length === 3) {
-      return true;
-    }
-  }
-  
-  // Check for YYYY-MM-DD format
-  if (dateStr.includes('-')) {
-    const parts = dateStr.split('-');
-    if (parts.length === 3) {
-      return true;
-    }
-  }
-  
-  // Try direct date parsing
-  try {
-    const date = new Date(dateStr);
-    return !isNaN(date.getTime());
-  } catch (e) {
-    return false;
+    console.error('Error processing student data:', error);
+    throw error;
   }
 }
 
-// Helper function to parse dates in different formats
-function parseDate(dateStr) {
-  if (!dateStr) return null;
+// Process horizontally structured subjects data
+function processHorizontalSubjects(values, headers, admissionNumber) {
+  // Find the row for this student
+  const admissionIndex = headers.findIndex(h => h.toLowerCase() === 'admission_no');
+  if (admissionIndex === -1) return [];
   
-  // Convert to string if it's not already
-  const str = dateStr.toString().trim();
+  // Find the student's row
+  let studentRow = null;
+  for (let i = 1; i < values.length; i++) {
+    if (values[i][admissionIndex] === admissionNumber) {
+      studentRow = values[i];
+      break;
+    }
+  }
   
-  // Try DD/MM/YYYY format
-  if (str.includes('/')) {
-    const parts = str.split('/');
-    if (parts.length === 3) {
-      if (parts[0].length <= 2 && parts[1].length <= 2) {
-        // Assuming DD/MM/YYYY format
-        return new Date(`${parts[1]}/${parts[0]}/${parts[2]}`);
-      } else {
-        // Assuming MM/DD/YYYY format
-        return new Date(str);
+  if (!studentRow) return [];
+  
+  // Process all subject columns
+  // Format expected: subject_progress, subject_grade (math_progress, math_grade, etc.)
+  const subjects = [];
+  const progressSuffix = '_progress';
+  const gradeSuffix = '_grade';
+  
+  for (let i = 0; i < headers.length; i++) {
+    const header = headers[i].toLowerCase();
+    
+    if (header.endsWith(progressSuffix)) {
+      const subject = header.substring(0, header.length - progressSuffix.length);
+      const progress = parseFloat(studentRow[i] || 0);
+      
+      // Find the matching grade column
+      const gradeHeader = `${subject}${gradeSuffix}`;
+      const gradeIndex = headers.findIndex(h => h.toLowerCase() === gradeHeader);
+      const grade = gradeIndex !== -1 ? studentRow[gradeIndex] : '';
+      
+      // Only add subjects that have progress values
+      if (!isNaN(progress) && progress > 0) {
+        subjects.push({
+          subject: capitalizeFirstLetter(subject),
+          progress: progress,
+          grade: grade
+        });
       }
     }
   }
   
-  // Try YYYY-MM-DD format
-  if (str.includes('-')) {
-    const parts = str.split('-');
-    if (parts.length === 3) {
-      return new Date(str);
+  return subjects;
+}
+
+// Process horizontally structured attendance data
+function processHorizontalAttendance(values, headers, admissionNumber) {
+  // Find the row for this student
+  const admissionIndex = headers.findIndex(h => h.toLowerCase() === 'admission_no');
+  if (admissionIndex === -1) return [];
+  
+  // Find the student's row
+  let studentRow = null;
+  for (let i = 1; i < values.length; i++) {
+    if (values[i][admissionIndex] === admissionNumber) {
+      studentRow = values[i];
+      break;
     }
   }
   
-  // Last resort, try direct parsing
-  return new Date(str);
+  if (!studentRow) return [];
+  
+  // Process all month columns
+  // Format expected: month_working, month_present, month_absent, month_percent
+  const attendance = [];
+  const workingSuffix = '_working';
+  const presentSuffix = '_present';
+  const absentSuffix = '_absent';
+  const percentSuffix = '_percent';
+  
+  for (let i = 0; i < headers.length; i++) {
+    const header = headers[i].toLowerCase();
+    
+    if (header.endsWith(workingSuffix)) {
+      const month = header.substring(0, header.length - workingSuffix.length);
+      const workingDays = parseInt(studentRow[i] || 0);
+      
+      // Find matching columns
+      const presentIndex = headers.findIndex(h => h.toLowerCase() === `${month}${presentSuffix}`);
+      const absentIndex = headers.findIndex(h => h.toLowerCase() === `${month}${absentSuffix}`);
+      const percentIndex = headers.findIndex(h => h.toLowerCase() === `${month}${percentSuffix}`);
+      
+      const present = presentIndex !== -1 ? parseInt(studentRow[presentIndex] || 0) : 0;
+      const absent = absentIndex !== -1 ? parseInt(studentRow[absentIndex] || 0) : 0;
+      const percentage = percentIndex !== -1 ? parseFloat(studentRow[percentIndex] || 0) : 0;
+      
+      // Only add months that have working days
+      if (!isNaN(workingDays) && workingDays > 0) {
+        attendance.push({
+          month: capitalizeFirstLetter(month),
+          workingDays: workingDays,
+          present: present,
+          absent: absent,
+          percentage: percentage
+        });
+      }
+    }
+  }
+  
+  return attendance;
 }
 
-// Start server
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
+// Utility function to capitalize first letter
+function capitalizeFirstLetter(string) {
+  return string.charAt(0).toUpperCase() + string.slice(1);
+}
+
+// Rest of the helper functions remain the same
+function findStudentByAdmissionNo(values, headers, admissionNo) {
+  const admissionIndex = headers.findIndex(h => h.toLowerCase() === 'admission_no');
+  if (admissionIndex === -1) return null;
+  
+  // Skip header row (index 0) and find student
+  for (let i = 1; i < values.length; i++) {
+    if (values[i][admissionIndex] === admissionNo) {
+      return values[i];
+    }
+  }
+  
+  return null;
+}
+
+function filterSheetByAdmissionNo(values, headers, admissionNo) {
+  const admissionIndex = headers.findIndex(h => h.toLowerCase() === 'admission_no');
+  if (admissionIndex === -1) return [];
+  
+  // Skip header row (index 0) and filter rows
+  return values.slice(1).filter(row => row[admissionIndex] === admissionNo);
+}
+
+function getValueByHeader(row, headers, headerName) {
+  const index = headers.findIndex(h => h.toLowerCase() === headerName.toLowerCase());
+  return index !== -1 ? (row[index] || '') : '';
+}
